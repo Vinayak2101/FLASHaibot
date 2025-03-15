@@ -35,6 +35,9 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 # Store chat history in memory (consider using a database for production)
 CHAT_HISTORY = {}  # {chat_id: [{"role": "user", "content": "..."}, {"role": "bot", "content": "..."}]}
 
+# Track blocked chats
+BLOCKED_CHATS = set()  # Chats that return 400 errors
+
 # Delay before sending replies (in seconds)
 REPLY_DELAY = 2  # Adjust as needed (e.g., 2-5 seconds)
 
@@ -65,6 +68,10 @@ def generate_response_with_retry(prompt: str, max_retries: int = 3):
 
 async def send_message(chat_id: str, text: str, business_connection_id: str = None):
     """Send a message to a chat, optionally via a business connection, with a delay."""
+    if chat_id in BLOCKED_CHATS:
+        logger.warning(f"Skipping message to blocked chat {chat_id}")
+        return
+
     try:
         # Simulate typing delay
         await asyncio.sleep(REPLY_DELAY)
@@ -82,7 +89,8 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 400:
             logger.error(f"Failed to send message to chat {chat_id}: {str(e)} - Chat may be blocked or restricted.")
-            await notify_owner(f"Failed to send message to chat {chat_id}: {str(e)} - Chat may be blocked or restricted.")
+            BLOCKED_CHATS.add(chat_id)
+            await notify_owner(f"Chat {chat_id} blocked or restricted: {str(e)}")
         else:
             logger.error(f"Failed to send message to chat {chat_id}: {str(e)}")
             await notify_owner(f"Failed to send message to chat {chat_id}: {str(e)}")
@@ -92,6 +100,10 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
 
 async def send_chat_action(chat_id: str, action: str, business_connection_id: str = None):
     """Send a chat action (e.g., typing) to a chat, optionally via a business connection."""
+    if chat_id in BLOCKED_CHATS:
+        logger.warning(f"Skipping chat action to blocked chat {chat_id}")
+        return
+
     try:
         payload = {
             "chat_id": chat_id,
@@ -106,6 +118,7 @@ async def send_chat_action(chat_id: str, action: str, business_connection_id: st
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 400:
             logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)} - Chat may be blocked or restricted.")
+            BLOCKED_CHATS.add(chat_id)
         else:
             logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)}")
     except Exception as e:
@@ -127,12 +140,13 @@ async def handle_business_connection(update: dict):
 async def handle_business_message(update: dict):
     """Handle business messages from users, generating responses using Gemini AI with chat history."""
     business_message = update.get("business_message", {})
-    if not business_message:
+    if not business_message or "text" not in business_message:
+        logger.debug(f"No valid text in business message update: {json.dumps(update)}")
         return
 
     chat_id = str(business_message["chat"]["id"])
     business_connection_id = business_message.get("business_connection_id")
-    user_message = business_message.get("text", "")
+    user_message = business_message.get("text", "").strip()
 
     if not user_message:
         await send_message(
@@ -182,11 +196,12 @@ async def handle_business_message(update: dict):
 async def handle_direct_message(update: dict):
     """Handle direct messages from users, generating responses using Gemini AI with chat history."""
     message = update.get("message", {})
-    if not message:
+    if not message or "text" not in message:
+        logger.debug(f"No valid text in direct message update: {json.dumps(update)}")
         return
 
     chat_id = str(message["chat"]["id"])
-    user_message = message.get("text", "")
+    user_message = message.get("text", "").strip()
 
     # Handle /start command
     if user_message.startswith("/start"):
@@ -195,7 +210,7 @@ async def handle_direct_message(update: dict):
         await send_message(chat_id, welcome_text)
         return
 
-    # Handle non-text messages
+    # Handle empty or non-text messages
     if not user_message:
         await send_message(
             chat_id,
@@ -240,6 +255,7 @@ async def handle_direct_message(update: dict):
 
 async def process_update(update: dict):
     """Process incoming updates from Telegram."""
+    logger.debug(f"Processing update: {json.dumps(update)}")
     if "business_connection" in update:
         await handle_business_connection(update)
     elif "business_message" in update:
@@ -277,6 +293,10 @@ async def long_polling():
             response = requests.get(f"{TELEGRAM_API_URL}/getUpdates", params=params, timeout=70)
             response.raise_for_status()
             updates = response.json().get("result", [])
+
+            if not updates:
+                logger.debug("No new updates received.")
+                continue
 
             for update in updates:
                 update_id = update["update_id"]
