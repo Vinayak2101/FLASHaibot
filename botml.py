@@ -44,6 +44,22 @@ BLOCKED_CHATS = set()
 # Delay before sending replies (in seconds)
 REPLY_DELAY = 2
 
+# Persistent offset storage
+OFFSET_FILE = "last_update_id.txt"
+
+def load_last_update_id():
+    """Load the last processed update ID from file."""
+    try:
+        with open(OFFSET_FILE, "r") as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+def save_last_update_id(update_id):
+    """Save the last processed update ID to file."""
+    with open(OFFSET_FILE, "w") as f:
+        f.write(str(update_id))
+
 async def notify_owner(message: str):
     """Notify the owner of errors or manual intervention needs."""
     try:
@@ -74,7 +90,6 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
 
     try:
         await asyncio.sleep(REPLY_DELAY)
-        # Use unique message_id if not provided
         feedback_id = message_id if message_id else str(time.time())
         keyboard = InlineKeyboardMarkup([
             [
@@ -85,7 +100,7 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
         payload = {
             "chat_id": chat_id,
             "text": text,
-            "reply_markup": json.dumps(keyboard.to_dict())  # Convert to JSON string as per Telegram API
+            "reply_markup": json.dumps(keyboard.to_dict())
         }
         if business_connection_id:
             payload["business_connection_id"] = business_connection_id
@@ -155,13 +170,11 @@ async def handle_feedback(callback_query: dict):
     }
     logger.info(f"Received {feedback} feedback for message {message_id} in chat {chat_id}")
 
-    # Update learned context with positive feedback
     global LEARNED_CONTEXT
     if feedback == "positive":
         LEARNED_CONTEXT += f"\n\nUser: {user_message}\nBot: {bot_response}"
         logger.info(f"Updated learned context with: User: {user_message}, Bot: {bot_response}")
 
-    # Acknowledge feedback
     try:
         payload = {"callback_query_id": callback_query["id"], "text": "Thanks for your feedback!"}
         response = requests.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json=payload)
@@ -233,6 +246,13 @@ async def handle_direct_message(update: dict):
 
     chat_id = str(message["chat"]["id"])
     user_message = message.get("text", "").strip()
+    message_timestamp = message.get("date", 0)  # Unix timestamp of the message
+
+    # Only process messages sent after the bot started
+    current_time = int(time.time())
+    if message_timestamp < current_time - 60:  # Ignore messages older than 60 seconds
+        logger.debug(f"Ignoring old message from chat {chat_id}: {user_message}")
+        return
 
     if user_message.startswith("/start"):
         user_name = message["from"]["first_name"]
@@ -299,13 +319,13 @@ async def set_webhook():
 
 async def long_polling():
     """Start long polling to receive updates from Telegram."""
-    last_update_id = None
+    last_update_id = load_last_update_id()
     processed_updates = set()
 
     while True:
         try:
             params = {"timeout": 60, "allowed_updates": ["message", "business_connection", "business_message", "callback_query"]}
-            if last_update_id:
+            if last_update_id is not None:
                 params["offset"] = last_update_id + 1
 
             response = requests.get(f"{TELEGRAM_API_URL}/getUpdates", params=params, timeout=70)
@@ -325,6 +345,7 @@ async def long_polling():
                 processed_updates.add(update_id)
                 last_update_id = update_id
                 await process_update(update)
+                save_last_update_id(last_update_id)  # Save offset after processing
 
             if len(processed_updates) > 1000:
                 processed_updates.clear()
