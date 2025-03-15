@@ -79,6 +79,13 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
         response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
         response.raise_for_status()
         logger.info(f"Sent message to chat {chat_id}: {text}")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 400:
+            logger.error(f"Failed to send message to chat {chat_id}: {str(e)} - Chat may be blocked or restricted.")
+            await notify_owner(f"Failed to send message to chat {chat_id}: {str(e)} - Chat may be blocked or restricted.")
+        else:
+            logger.error(f"Failed to send message to chat {chat_id}: {str(e)}")
+            await notify_owner(f"Failed to send message to chat {chat_id}: {str(e)}")
     except Exception as e:
         logger.error(f"Failed to send message to chat {chat_id}: {str(e)}")
         await notify_owner(f"Failed to send message to chat {chat_id}: {str(e)}")
@@ -96,6 +103,11 @@ async def send_chat_action(chat_id: str, action: str, business_connection_id: st
         response = requests.post(f"{TELEGRAM_API_URL}/sendChatAction", json=payload)
         response.raise_for_status()
         logger.info(f"Sent chat action {action} to chat {chat_id}")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 400:
+            logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)} - Chat may be blocked or restricted.")
+        else:
+            logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)}")
     except Exception as e:
         logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)}")
 
@@ -254,6 +266,8 @@ async def set_webhook():
 async def long_polling():
     """Start long polling to receive updates from Telegram."""
     last_update_id = None
+    processed_updates = set()  # Track processed update IDs to prevent loops
+
     while True:
         try:
             params = {"timeout": 60, "allowed_updates": ["message", "business_connection", "business_message"]}
@@ -265,8 +279,18 @@ async def long_polling():
             updates = response.json().get("result", [])
 
             for update in updates:
-                last_update_id = update["update_id"]
+                update_id = update["update_id"]
+                if update_id in processed_updates:
+                    logger.warning(f"Skipping already processed update: {update_id}")
+                    continue
+
+                processed_updates.add(update_id)
+                last_update_id = update_id
                 await process_update(update)
+
+            # Clear old processed updates to prevent memory growth
+            if len(processed_updates) > 1000:
+                processed_updates.clear()
 
         except Exception as e:
             logger.error(f"Error in long polling: {str(e)}")
