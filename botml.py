@@ -83,27 +83,30 @@ def generate_response_with_retry(prompt: str, max_retries: int = 3):
             raise e
 
 async def send_message(chat_id: str, text: str, business_connection_id: str = None, message_id: str = None):
-    """Send a message with feedback buttons."""
+    """Send a message with feedback buttons only for the owner."""
     if chat_id in BLOCKED_CHATS:
         logger.warning(f"Skipping message to blocked chat {chat_id}")
         return None
 
     try:
         await asyncio.sleep(REPLY_DELAY)
-        feedback_id = message_id if message_id else str(time.time())
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("👍", callback_data=f"feedback_positive_{feedback_id}"),
-                InlineKeyboardButton("👎", callback_data=f"feedback_negative_{feedback_id}")
-            ]
-        ])
         payload = {
             "chat_id": chat_id,
-            "text": text,
-            "reply_markup": json.dumps(keyboard.to_dict())
+            "text": text
         }
         if business_connection_id:
             payload["business_connection_id"] = business_connection_id
+
+        # Only add feedback buttons if the chat is the owner's
+        if chat_id == OWNER_CHAT_ID:
+            feedback_id = message_id if message_id else str(time.time())
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("👍", callback_data=f"feedback_positive_{feedback_id}"),
+                    InlineKeyboardButton("👎", callback_data=f"feedback_negative_{feedback_id}")
+                ]
+            ])
+            payload["reply_markup"] = json.dumps(keyboard.to_dict())
 
         response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
         response.raise_for_status()
@@ -147,13 +150,17 @@ async def send_chat_action(chat_id: str, action: str, business_connection_id: st
         logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)}")
 
 async def handle_feedback(callback_query: dict):
-    """Handle feedback from inline buttons."""
+    """Handle feedback from inline buttons, only from the owner."""
     data = callback_query["data"]
     message = callback_query["message"]
     chat_id = str(message["chat"]["id"])
     message_id = str(message["message_id"])
     user_message = CHAT_HISTORY[chat_id][-2]["content"] if len(CHAT_HISTORY[chat_id]) >= 2 else "Unknown"
     bot_response = message["text"]
+
+    if chat_id != OWNER_CHAT_ID:
+        logger.debug(f"Ignoring feedback from non-owner chat {chat_id}")
+        return
 
     if data.startswith("feedback_positive"):
         feedback = "positive"
@@ -203,6 +210,10 @@ async def handle_business_message(update: dict):
         return
 
     chat_id = str(business_message["chat"]["id"])
+    if chat_id == OWNER_CHAT_ID:
+        logger.debug(f"Ignoring business message from owner chat {chat_id}")
+        return
+
     business_connection_id = business_message.get("business_connection_id")
     user_message = business_message.get("text", "").strip()
 
@@ -245,6 +256,10 @@ async def handle_direct_message(update: dict):
         return
 
     chat_id = str(message["chat"]["id"])
+    if chat_id == OWNER_CHAT_ID:
+        logger.debug(f"Ignoring direct message from owner chat {chat_id}")
+        return
+
     user_message = message.get("text", "").strip()
     message_timestamp = message.get("date", 0)  # Unix timestamp of the message
 
