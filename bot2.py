@@ -51,24 +51,27 @@ rate_limit_semaphore = asyncio.Semaphore(RATE_LIMIT_PER_SECOND)
 
 async def notify_owner(message: str):
     """Notify the owner of errors or manual intervention needs."""
-    try:
-        payload = {
-            "chat_id": OWNER_CHAT_ID,
-            "text": message
-        }
-        response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
-        response.raise_for_status()
-        logger.info(f"Notified owner: {message}")
-    except Exception as e:
-        logger.error(f"Failed to notify owner: {str(e)}")
+    async with rate_limit_semaphore:
+        try:
+            payload = {
+                "chat_id": OWNER_CHAT_ID,
+                "text": message
+            }
+            response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
+            response.raise_for_status()
+            logger.info(f"Notified owner: {message}")
+        except Exception as e:
+            logger.error(f"Failed to notify owner: {str(e)}")
 
 def generate_response_with_retry(prompt: str, max_retries: int = 3):
     """Generate a response with retry logic for API failures."""
     for attempt in range(max_retries):
         try:
             response = model.generate_content(prompt)
+            logger.info(f"Generated response for prompt: {prompt[:50]}...")  # Log first 50 chars of prompt
             return response
         except Exception as e:
+            logger.error(f"Gemini API error (attempt {attempt + 1}/{max_retries}): {str(e)}")
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt + random.uniform(0, 1))
                 continue
@@ -92,26 +95,27 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
 
             response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
             response.raise_for_status()
-            logger.info(f"Sent message to chat {chat_id}: {text}")
+            logger.info(f"Sent message to chat {chat_id}: {text[:50]}...")  # Log first 50 chars of message
         except Exception as e:
             logger.error(f"Failed to send message to chat {chat_id}: {str(e)}")
             await notify_owner(f"Failed to send message to chat {chat_id}: {str(e)}")
 
 async def send_chat_action(chat_id: str, action: str, business_connection_id: str = None):
     """Send a chat action (e.g., typing) to a chat."""
-    try:
-        payload = {
-            "chat_id": chat_id,
-            "action": action
-        }
-        if business_connection_id:
-            payload["business_connection_id"] = business_connection_id
+    async with rate_limit_semaphore:
+        try:
+            payload = {
+                "chat_id": chat_id,
+                "action": action
+            }
+            if business_connection_id:
+                payload["business_connection_id"] = business_connection_id
 
-        response = requests.post(f"{TELEGRAM_API_URL}/sendChatAction", json=payload)
-        response.raise_for_status()
-        logger.info(f"Sent chat action {action} to chat {chat_id}")
-    except Exception as e:
-        logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)}")
+            response = requests.post(f"{TELEGRAM_API_URL}/sendChatAction", json=payload)
+            response.raise_for_status()
+            logger.info(f"Sent chat action {action} to chat {chat_id}")
+        except Exception as e:
+            logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)}")
 
 async def handle_business_connection(update: dict):
     """Handle business connection updates."""
@@ -128,26 +132,31 @@ async def handle_business_connection(update: dict):
 
 async def batch_message_processor():
     """Process batched messages for each user after waiting for BATCH_WAIT_TIME."""
+    logger.info("Starting batch message processor...")
     while True:
         await asyncio.sleep(BATCH_WAIT_TIME)
+        logger.info("Checking for batched messages...")
         for chat_id, messages in list(user_messages.items()):
             if messages:
+                logger.info(f"Processing batched messages for chat {chat_id}: {len(messages)} messages")
                 # Combine all messages into a single prompt
-                combined_message = "\n".join(messages)
+                combined_message = "\n".join([m["text"] for m in messages])
                 prompt = f"{CONTEXT}\nUser questions:\n{combined_message}"
                 try:
                     response = generate_response_with_retry(prompt)
-                    business_connection_id = messages[0].get("business_connection_id")
+                    business_connection_id = messages[0]["business_connection_id"]
                     await send_message(chat_id, response.text, business_connection_id)
+                    logger.info(f"Successfully processed batched messages for chat {chat_id}")
                 except Exception as e:
                     logger.error(f"Error processing batched messages for chat {chat_id}: {str(e)}")
                     await notify_owner(f"Error processing batched messages for chat {chat_id}: {str(e)}")
                     if "rate limit" in str(e).lower():
-                        await send_message(chat_id, "I'm currently handling many requests. Please try again later.")
+                        await send_message(chat_id, "I'm currently handling many requests. Please try again later.", business_connection_id)
                     else:
-                        await send_message(chat_id, "Oops, something went wrong! Please wait for THEFLASH47 to assist you.")
+                        await send_message(chat_id, "Oops, something went wrong! Please wait for THEFLASH47 to assist you.", business_connection_id)
                 finally:
                     user_messages[chat_id].clear()  # Clear processed messages
+                    logger.info(f"Cleared batched messages for chat {chat_id}")
 
 async def handle_business_message(update: dict):
     """Handle business messages by adding to the user's message batch."""
@@ -158,6 +167,12 @@ async def handle_business_message(update: dict):
     chat_id = str(business_message["chat"]["id"])
     business_connection_id = business_message.get("business_connection_id")
     user_message = business_message.get("text", "")
+    sender_id = str(business_message.get("from", {}).get("id", ""))
+
+    # Ignore messages sent by the bot or owner
+    if sender_id == OWNER_CHAT_ID or business_message.get("from", {}).get("is_bot", False):
+        logger.info(f"Ignoring message from owner or bot in chat {chat_id}: {user_message}")
+        return
 
     if not user_message:
         await send_message(
@@ -179,6 +194,12 @@ async def handle_direct_message(update: dict):
 
     chat_id = str(message["chat"]["id"])
     user_message = message.get("text", "")
+    sender_id = str(message.get("from", {}).get("id", ""))
+
+    # Ignore messages sent by the bot or owner
+    if sender_id == OWNER_CHAT_ID or message.get("from", {}).get("is_bot", False):
+        logger.info(f"Ignoring message from owner or bot in chat {chat_id}: {user_message}")
+        return
 
     # Handle /start command immediately
     if user_message.startswith("/start"):
