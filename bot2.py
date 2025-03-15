@@ -74,21 +74,17 @@ async def generate_response(prompt):
 
 async def send_message(chat_id, text, is_business=False):
     """Send message with typing indicator and rate limiting."""
-    # Rate limiting: 1-second cooldown per chat
     if chat_id in LAST_SENT and (time.time() - LAST_SENT[chat_id]) < 1:
         await asyncio.sleep(1 - (time.time() - LAST_SENT[chat_id]))
 
-    # Show typing indicator
     try:
         requests.post(f"{TELEGRAM_API_URL}/sendChatAction", json={"chat_id": chat_id, "action": "typing"})
     except Exception as e:
         logger.error(f"Failed to send typing action: {str(e)}")
 
-    # Human-like delay
     delay = random.uniform(1.0, 3.0)
     await asyncio.sleep(delay)
 
-    # Send message
     payload = {"chat_id": chat_id, "text": text}
     try:
         response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
@@ -104,7 +100,7 @@ async def process_messages(chat_id, messages, is_business=False):
     if not messages:
         return
 
-    context = load_context()  # Load fresh context
+    context = load_context()
     if len(messages) == 1:
         prompt = f"{context}\nUser question: {messages[0]['text']}"
     else:
@@ -129,42 +125,41 @@ async def handle_pending_messages():
 async def process_update(update):
     """Process incoming Telegram updates and queue messages."""
     print(f"Raw update: {update}")
-
-    # Business message
     if "business_message" in update:
         msg = update["business_message"]
         chat_id = msg["chat"]["id"]
-        PENDING_MESSAGES[chat_id].append({"text": msg["text"], "timestamp": time.time(), "is_business": True})
-
-    # Direct message
+        if "text" in msg:  # Only queue if text exists
+            PENDING_MESSAGES[chat_id].append({"text": msg["text"], "timestamp": time.time(), "is_business": True})
+        else:
+            logger.info(f"Skipped non-text business_message: {update}")
     elif "message" in update:
         msg = update["message"]
         chat_id = msg["chat"]["id"]
-        user_message = msg["text"]
-        if user_message == "/start":
-            await send_message(chat_id, "Hi! I’m your support bot, powered by Gemini. How can I help you today?")
+        if "text" in msg:  # Only process if text exists
+            user_message = msg["text"]
+            if user_message == "/start":
+                await send_message(chat_id, "Hi! I’m your support bot, powered by Gemini. How can I help you today?")
+            else:
+                PENDING_MESSAGES[chat_id].append({"text": user_message, "timestamp": time.time(), "is_business": False})
         else:
-            PENDING_MESSAGES[chat_id].append({"text": user_message, "timestamp": time.time(), "is_business": False})
+            logger.info(f"Skipped non-text message: {update}")
 
 async def long_polling():
     """Start long polling to receive updates from Telegram."""
-    asyncio.create_task(handle_pending_messages())  # Start message batching task
+    asyncio.create_task(handle_pending_messages())
     last_update_id = None
     while True:
         try:
             params = {"timeout": 60, "allowed_updates": ["message", "business_connection", "business_message"]}
             if last_update_id:
                 params["offset"] = last_update_id + 1
-
             response = requests.get(f"{TELEGRAM_API_URL}/getUpdates", params=params, timeout=70)
             response.raise_for_status()
             updates = response.json().get("result", [])
-
             tasks = [process_update(update) for update in updates]
             if tasks:
                 await asyncio.gather(*tasks)
                 last_update_id = updates[-1]["update_id"]
-
         except Exception as e:
             logger.error(f"Error in long polling: {str(e)}")
             await notify_owner(f"Error in long polling: {str(e)}")
