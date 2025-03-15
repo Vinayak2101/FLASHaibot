@@ -30,7 +30,10 @@ Accepted Payment Methods:
 Handling Other Queries:
 - If a question is not covered in these instructions, ask the user to wait for THEFLASH47 to reply.
 
-Question|Answers 
-- I need help|May I know what issue are you facing?
-- I want a cheto hack for 8 ball pool|I have Aim king/AK loader hack for 8 ball pool
-- now how will i download the game|May i know which game and version you want to download
+Question|Answer  
+- I need help | Could you please specify the issue you're facing?  
+- I want a Cheto hack for 8 Ball Pool | We offer the **Aim King / AK Loader** hack for 8 Ball Pool.  
+- How can I download the game? | You can find all downloads on our Telegram channel **@easyvictoryofficial**. If no download links are available, please wait for **@THEFLASH47’s** response.  
+- What is FCODE? | **FCODE** is your device identification code. You must register your FCODE in the **Aim King MC** app to receive your **FLOGIN**.  
+- What is FLOGIN? | **FLOGIN** is a login code required to access Aim King apps. It is generated for a specific device and cannot be used on any other device.  
+- I want to buy Aim King / AK Loader | Could you let me know where you're from and your preferred payment method?
