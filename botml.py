@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
+OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")  # Your chat ID (655037157)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Set this if deploying with webhooks
 
@@ -87,7 +87,7 @@ def generate_response_with_retry(prompt: str, max_retries: int = 3):
             raise e
 
 async def send_message(chat_id: str, text: str, business_connection_id: str = None, message_id: str = None):
-    """Send a message with feedback buttons only for the owner."""
+    """Send a message with feedback buttons only for the owner's chat."""
     if chat_id in BLOCKED_CHATS:
         logger.warning(f"Skipping message to blocked chat {chat_id}")
         return None
@@ -102,9 +102,9 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
             payload["business_connection_id"] = business_connection_id
 
         # Debug the chat_id vs OWNER_CHAT_ID comparison
-        logger.debug(f"Chat ID: {chat_id}, Owner Chat ID: {OWNER_CHAT_ID}, Is Owner: {chat_id == OWNER_CHAT_ID}")
+        logger.debug(f"Chat ID: {chat_id}, Owner Chat ID: {OWNER_CHAT_ID}, Is Owner Chat: {chat_id == OWNER_CHAT_ID}")
 
-        # Only add feedback buttons if the chat is the owner's
+        # Only add feedback buttons if the chat is the owner's chat
         if chat_id == OWNER_CHAT_ID:
             feedback_id = message_id if message_id else str(time.time())
             keyboard = InlineKeyboardMarkup([
@@ -160,7 +160,7 @@ async def send_chat_action(chat_id: str, action: str, business_connection_id: st
         logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)}")
 
 async def handle_feedback(callback_query: dict):
-    """Handle feedback from inline buttons, only from the owner."""
+    """Handle feedback from inline buttons, only from the owner's chat."""
     data = callback_query["data"]
     message = callback_query["message"]
     chat_id = str(message["chat"]["id"])
@@ -219,9 +219,12 @@ async def handle_business_message(update: dict):
         logger.debug(f"No valid text in business message update: {json.dumps(update)}")
         return
 
+    sender_id = str(business_message["from"]["id"])
     chat_id = str(business_message["chat"]["id"])
-    if chat_id == OWNER_CHAT_ID:
-        logger.debug(f"Ignoring business message from owner chat {chat_id}")
+
+    # Ignore messages sent by the owner
+    if sender_id == OWNER_CHAT_ID:
+        logger.debug(f"Ignoring business message from owner (sender_id: {sender_id}) in chat {chat_id}")
         return
 
     business_connection_id = business_message.get("business_connection_id")
@@ -265,9 +268,12 @@ async def handle_direct_message(update: dict):
         logger.debug(f"No valid text in direct message update: {json.dumps(update)}")
         return
 
+    sender_id = str(message["from"]["id"])
     chat_id = str(message["chat"]["id"])
-    if chat_id == OWNER_CHAT_ID:
-        logger.debug(f"Ignoring direct message from owner chat {chat_id}")
+
+    # Ignore messages sent by the owner
+    if sender_id == OWNER_CHAT_ID:
+        logger.debug(f"Ignoring direct message from owner (sender_id: {sender_id}) in chat {chat_id}")
         return
 
     user_message = message.get("text", "").strip()
