@@ -8,8 +8,8 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from telegram_inline import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configure logging with DEBUG level for troubleshooting
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -18,6 +18,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Set this if deploying with webhooks
+
+# Log the loaded OWNER_CHAT_ID to verify
+logger.debug(f"Loaded OWNER_CHAT_ID: {OWNER_CHAT_ID}")
 
 # Configure Gemini AI
 genai.configure(api_key=GEMINI_API_KEY)
@@ -67,6 +70,7 @@ async def notify_owner(message: str):
         response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
         response.raise_for_status()
         logger.info(f"Notified owner: {message}")
+        logger.debug(f"Notification sent to OWNER_CHAT_ID: {OWNER_CHAT_ID}")
     except Exception as e:
         logger.error(f"Failed to notify owner: {str(e)}")
 
@@ -97,6 +101,9 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
         if business_connection_id:
             payload["business_connection_id"] = business_connection_id
 
+        # Debug the chat_id vs OWNER_CHAT_ID comparison
+        logger.debug(f"Chat ID: {chat_id}, Owner Chat ID: {OWNER_CHAT_ID}, Is Owner: {chat_id == OWNER_CHAT_ID}")
+
         # Only add feedback buttons if the chat is the owner's
         if chat_id == OWNER_CHAT_ID:
             feedback_id = message_id if message_id else str(time.time())
@@ -107,6 +114,9 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
                 ]
             ])
             payload["reply_markup"] = json.dumps(keyboard.to_dict())
+            logger.debug(f"Added feedback buttons for owner chat {chat_id}")
+        else:
+            logger.debug(f"No feedback buttons added for non-owner chat {chat_id}")
 
         response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
         response.raise_for_status()
