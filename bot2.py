@@ -1,57 +1,218 @@
 import asyncio
+import json
 import logging
 import os
-import random
 import time
+import random
 import requests
-import google.generativeai as genai
 from dotenv import load_dotenv
-from queue import Queue
+import google.generativeai as genai
 from collections import defaultdict
+from asyncio import Queue
 
-# Load .env file
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
 load_dotenv()
-
-# Constants from .env
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-WEBHOOK_URL = ""  # Leave empty for polling
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-# Gemini setup
+# Configure Gemini AI
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 # Load context from file
 def load_context():
+    with open("context.txt", "r") as f:
+        return f.read()
+
+CONTEXT = load_context()
+
+# Telegram API base URL
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+# Message queue and rate limiting
+message_queue = Queue()
+user_messages = defaultdict(list)  # Store messages per user
+BATCH_WAIT_TIME = 60  # Wait 1 minute to batch messages
+RATE_LIMIT_PER_SECOND = 30  # Telegram API limit: 30 messages per second globally
+rate_limit_semaphore = asyncio.Semaphore(RATE_LIMIT_PER_SECOND)
+
+async def notify_owner(message: str):
+    """Notify the owner of errors or manual intervention needs."""
     try:
-        with open("context.txt", "r") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        logger.error("context.txt not found!")
-        return "Default context: I’m a support bot for THEFLASH47. How can I assist you?"
-
-# Logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
-
-# Response cache and message queue
-RESPONSE_CACHE = {}
-PENDING_MESSAGES = defaultdict(list)  # Store messages per chat_id
-LAST_SENT = {}  # Rate limiting tracker
-
-async def notify_owner(message):
-    """Notify the owner of errors."""
-    try:
-        requests.post(f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": OWNER_CHAT_ID, "text": message})
+        payload = {
+            "chat_id": OWNER_CHAT_ID,
+            "text": message
+        }
+        response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
+        response.raise_for_status()
+        logger.info(f"Notified owner: {message}")
     except Exception as e:
         logger.error(f"Failed to notify owner: {str(e)}")
+
+def generate_response_with_retry(prompt: str, max_retries: int = 3):
+    """Generate a response with retry logic for API failures."""
+    for attempt in range(max_retries):
+        try:
+            response = model.generate_content(prompt)
+            return response
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt + random.uniform(0, 1))
+                continue
+            raise e
+
+async def send_message(chat_id: str, text: str, business_connection_id: str = None):
+    """Send a message to a chat with rate limiting and human-like delay."""
+    async with rate_limit_semaphore:
+        try:
+            # Simulate human typing delay (1-3 seconds)
+            typing_delay = random.uniform(1, 3)
+            await send_chat_action(chat_id, "typing", business_connection_id)
+            await asyncio.sleep(typing_delay)
+
+            payload = {
+                "chat_id": chat_id,
+                "text": text
+            }
+            if business_connection_id:
+                payload["business_connection_id"] = business_connection_id
+
+            response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
+            response.raise_for_status()
+            logger.info(f"Sent message to chat {chat_id}: {text}")
+        except Exception as e:
+            logger.error(f"Failed to send message to chat {chat_id}: {str(e)}")
+            await notify_owner(f"Failed to send message to chat {chat_id}: {str(e)}")
+
+async def send_chat_action(chat_id: str, action: str, business_connection_id: str = None):
+    """Send a chat action (e.g., typing) to a chat."""
+    try:
+        payload = {
+            "chat_id": chat_id,
+            "action": action
+        }
+        if business_connection_id:
+            payload["business_connection_id"] = business_connection_id
+
+        response = requests.post(f"{TELEGRAM_API_URL}/sendChatAction", json=payload)
+        response.raise_for_status()
+        logger.info(f"Sent chat action {action} to chat {chat_id}")
+    except Exception as e:
+        logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)}")
+
+async def handle_business_connection(update: dict):
+    """Handle business connection updates."""
+    business_connection = update.get("business_connection", {})
+    if not business_connection:
+        return
+
+    logger.info(
+        f"Business Connection: ID={business_connection.get('id')}, "
+        f"User={business_connection.get('user', {}).get('id')}, "
+        f"Can Reply={business_connection.get('can_reply')}, "
+        f"Disabled={business_connection.get('is_enabled') is False}"
+    )
+
+async def batch_message_processor():
+    """Process batched messages for each user after waiting for BATCH_WAIT_TIME."""
+    while True:
+        await asyncio.sleep(BATCH_WAIT_TIME)
+        for chat_id, messages in list(user_messages.items()):
+            if messages:
+                # Combine all messages into a single prompt
+                combined_message = "\n".join(messages)
+                prompt = f"{CONTEXT}\nUser questions:\n{combined_message}"
+                try:
+                    response = generate_response_with_retry(prompt)
+                    business_connection_id = messages[0].get("business_connection_id")
+                    await send_message(chat_id, response.text, business_connection_id)
+                except Exception as e:
+                    logger.error(f"Error processing batched messages for chat {chat_id}: {str(e)}")
+                    await notify_owner(f"Error processing batched messages for chat {chat_id}: {str(e)}")
+                    if "rate limit" in str(e).lower():
+                        await send_message(chat_id, "I'm currently handling many requests. Please try again later.")
+                    else:
+                        await send_message(chat_id, "Oops, something went wrong! Please wait for THEFLASH47 to assist you.")
+                finally:
+                    user_messages[chat_id].clear()  # Clear processed messages
+
+async def handle_business_message(update: dict):
+    """Handle business messages by adding to the user's message batch."""
+    business_message = update.get("business_message", {})
+    if not business_message:
+        return
+
+    chat_id = str(business_message["chat"]["id"])
+    business_connection_id = business_message.get("business_connection_id")
+    user_message = business_message.get("text", "")
+
+    if not user_message:
+        await send_message(
+            chat_id,
+            "Sorry, I can only process text messages. Please wait for THEFLASH47 to assist you.",
+            business_connection_id
+        )
+        return
+
+    # Add message to user's batch
+    user_messages[chat_id].append({"text": user_message, "business_connection_id": business_connection_id})
+    logger.info(f"Added business message to batch for chat {chat_id}: {user_message}")
+
+async def handle_direct_message(update: dict):
+    """Handle direct messages by adding to the user's message batch."""
+    message = update.get("message", {})
+    if not message:
+        return
+
+    chat_id = str(message["chat"]["id"])
+    user_message = message.get("text", "")
+
+    # Handle /start command immediately
+    if user_message.startswith("/start"):
+        user_name = message["from"]["first_name"]
+        welcome_text = f"Hi {user_name}! I'm your support bot, powered by Gemini. How can I help you today?"
+        await send_message(chat_id, welcome_text)
+        return
+
+    if not user_message:
+        await send_message(chat_id, "Sorry, I can only process text messages. Please wait for THEFLASH47 to assist you.")
+        return
+
+    # Add message to user's batch
+    user_messages[chat_id].append({"text": user_message, "business_connection_id": None})
+    logger.info(f"Added direct message to batch for chat {chat_id}: {user_message}")
+
+async def process_update(update: dict):
+    """Process incoming updates from Telegram."""
+    if "business_connection" in update:
+        await handle_business_connection(update)
+    elif "business_message" in update:
+        await handle_business_message(update)
+    elif "message" in update:
+        await handle_direct_message(update)
+    else:
+        logger.warning(f"Unhandled update type: {update}")
 
 async def set_webhook():
     """Set up a webhook for receiving updates."""
     try:
-        payload = {"url": WEBHOOK_URL, "allowed_updates": ["message", "business_connection", "business_message"]}
+        payload = {
+            "url": WEBHOOK_URL,
+            "allowed_updates": ["message", "business_connection", "business_message"]
+        }
         response = requests.post(f"{TELEGRAM_API_URL}/setWebhook", json=payload)
         response.raise_for_status()
         logger.info(f"Webhook set successfully: {WEBHOOK_URL}")
@@ -59,107 +220,23 @@ async def set_webhook():
         logger.error(f"Failed to set webhook: {str(e)}")
         await notify_owner(f"Failed to set webhook: {str(e)}")
 
-async def generate_response(prompt):
-    """Generate AI response with caching."""
-    if prompt in RESPONSE_CACHE:
-        logger.info("Using cached response")
-        return RESPONSE_CACHE[prompt]
-    try:
-        response = model.generate_content(prompt)
-        RESPONSE_CACHE[prompt] = response.text
-        return response.text
-    except Exception as e:
-        logger.error(f"AI generation error: {str(e)}")
-        return "Oops, something went wrong! Please wait for THEFLASH47 to assist you."
-
-async def send_message(chat_id, text, is_business=False):
-    """Send message with typing indicator and rate limiting."""
-    if chat_id in LAST_SENT and (time.time() - LAST_SENT[chat_id]) < 1:
-        await asyncio.sleep(1 - (time.time() - LAST_SENT[chat_id]))
-
-    try:
-        requests.post(f"{TELEGRAM_API_URL}/sendChatAction", json={"chat_id": chat_id, "action": "typing"})
-    except Exception as e:
-        logger.error(f"Failed to send typing action: {str(e)}")
-
-    delay = random.uniform(1.0, 3.0)
-    await asyncio.sleep(delay)
-
-    payload = {"chat_id": chat_id, "text": text}
-    try:
-        response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
-        response.raise_for_status()
-        logger.info(f"{'Inbox' if is_business else 'Direct'} message sent (chat_id={chat_id}): {text}")
-        LAST_SENT[chat_id] = time.time()
-    except Exception as e:
-        logger.error(f"Failed to send message: {str(e)}")
-        await notify_owner(f"Send message failed: {str(e)}")
-
-async def process_messages(chat_id, messages, is_business=False):
-    """Process and reply to batched messages."""
-    if not messages:
-        return
-
-    context = load_context()
-    if len(messages) == 1:
-        prompt = f"{context}\nUser question: {messages[0]['text']}"
-    else:
-        combined = "\n".join([f"- {msg['text']}" for msg in messages])
-        prompt = f"{context}\nUser questions:\n{combined}\n\nProvide a single response addressing all questions."
-
-    response = await generate_response(prompt)
-    await send_message(chat_id, response, is_business)
-
-async def handle_pending_messages():
-    """Check and process pending messages after a delay."""
-    while True:
-        await asyncio.sleep(10)  # Check every 10 seconds
-        current_time = time.time()
-        for chat_id in list(PENDING_MESSAGES.keys()):
-            messages = PENDING_MESSAGES[chat_id]
-            if messages and (current_time - messages[-1]["timestamp"]) >= 120:  # 2 minutes
-                is_business = messages[0]["is_business"]
-                await process_messages(chat_id, messages, is_business)
-                del PENDING_MESSAGES[chat_id]
-
-async def process_update(update):
-    """Process incoming Telegram updates and queue messages."""
-    print(f"Raw update: {update}")
-    if "business_message" in update:
-        msg = update["business_message"]
-        chat_id = msg["chat"]["id"]
-        if "text" in msg:  # Only queue if text exists
-            PENDING_MESSAGES[chat_id].append({"text": msg["text"], "timestamp": time.time(), "is_business": True})
-        else:
-            logger.info(f"Skipped non-text business_message: {update}")
-    elif "message" in update:
-        msg = update["message"]
-        chat_id = msg["chat"]["id"]
-        if "text" in msg:  # Only process if text exists
-            user_message = msg["text"]
-            if user_message == "/start":
-                await send_message(chat_id, "Hi! I’m your support bot, powered by Gemini. How can I help you today?")
-            else:
-                PENDING_MESSAGES[chat_id].append({"text": user_message, "timestamp": time.time(), "is_business": False})
-        else:
-            logger.info(f"Skipped non-text message: {update}")
-
 async def long_polling():
     """Start long polling to receive updates from Telegram."""
-    asyncio.create_task(handle_pending_messages())
     last_update_id = None
     while True:
         try:
             params = {"timeout": 60, "allowed_updates": ["message", "business_connection", "business_message"]}
             if last_update_id:
                 params["offset"] = last_update_id + 1
+
             response = requests.get(f"{TELEGRAM_API_URL}/getUpdates", params=params, timeout=70)
             response.raise_for_status()
             updates = response.json().get("result", [])
-            tasks = [process_update(update) for update in updates]
-            if tasks:
-                await asyncio.gather(*tasks)
-                last_update_id = updates[-1]["update_id"]
+
+            for update in updates:
+                last_update_id = update["update_id"]
+                await process_update(update)
+
         except Exception as e:
             logger.error(f"Error in long polling: {str(e)}")
             await notify_owner(f"Error in long polling: {str(e)}")
@@ -168,6 +245,8 @@ async def long_polling():
 async def main():
     """Start the bot and begin polling or webhook setup."""
     logger.info("Bot is starting...")
+    # Start the batch message processor
+    asyncio.create_task(batch_message_processor())
     if WEBHOOK_URL:
         await set_webhook()
         logger.info("Webhook mode enabled. Please deploy the bot with a webhook server.")
