@@ -74,16 +74,18 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
 
     try:
         await asyncio.sleep(REPLY_DELAY)
+        # Use unique message_id if not provided
+        feedback_id = message_id if message_id else str(time.time())
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("👍", callback_data=f"feedback_positive_{message_id}"),
-                InlineKeyboardButton("👎", callback_data=f"feedback_negative_{message_id}")
+                InlineKeyboardButton("👍", callback_data=f"feedback_positive_{feedback_id}"),
+                InlineKeyboardButton("👎", callback_data=f"feedback_negative_{feedback_id}")
             ]
         ])
         payload = {
             "chat_id": chat_id,
             "text": text,
-            "reply_markup": keyboard.to_dict()
+            "reply_markup": json.dumps(keyboard.to_dict())  # Convert to JSON string as per Telegram API
         }
         if business_connection_id:
             payload["business_connection_id"] = business_connection_id
@@ -162,9 +164,23 @@ async def handle_feedback(callback_query: dict):
     # Acknowledge feedback
     try:
         payload = {"callback_query_id": callback_query["id"], "text": "Thanks for your feedback!"}
-        requests.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json=payload)
+        response = requests.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json=payload)
+        response.raise_for_status()
     except Exception as e:
         logger.error(f"Failed to acknowledge feedback: {str(e)}")
+
+async def handle_business_connection(update: dict):
+    """Handle business connection updates."""
+    business_connection = update.get("business_connection", {})
+    if not business_connection:
+        return
+
+    logger.info(
+        f"Business Connection: ID={business_connection.get('id')}, "
+        f"User={business_connection.get('user', {}).get('id')}, "
+        f"Can Reply={business_connection.get('can_reply')}, "
+        f"Disabled={business_connection.get('is_enabled') is False}"
+    )
 
 async def handle_business_message(update: dict):
     """Handle business messages with context-aware responses."""
@@ -196,7 +212,7 @@ async def handle_business_message(update: dict):
 
     try:
         response = generate_response_with_retry(prompt)
-        message_id = await send_message(chat_id, response.text, business_connection_id, str(time.time()))
+        message_id = await send_message(chat_id, response.text, business_connection_id)
         if message_id:
             CHAT_HISTORY[chat_id].append({"role": "bot", "content": response.text})
     except Exception as e:
@@ -242,7 +258,7 @@ async def handle_direct_message(update: dict):
 
     try:
         response = generate_response_with_retry(prompt)
-        message_id = await send_message(chat_id, response.text, message_id=str(time.time()))
+        message_id = await send_message(chat_id, response.text)
         if message_id:
             CHAT_HISTORY[chat_id].append({"role": "bot", "content": response.text})
     except Exception as e:
@@ -266,6 +282,20 @@ async def process_update(update: dict):
         await handle_direct_message(update)
     else:
         logger.warning(f"Unhandled update type: {update}")
+
+async def set_webhook():
+    """Set up a webhook for receiving updates."""
+    try:
+        payload = {
+            "url": WEBHOOK_URL,
+            "allowed_updates": ["message", "business_connection", "business_message", "callback_query"]
+        }
+        response = requests.post(f"{TELEGRAM_API_URL}/setWebhook", json=payload)
+        response.raise_for_status()
+        logger.info(f"Webhook set successfully: {WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {str(e)}")
+        await notify_owner(f"Failed to set webhook: {str(e)}")
 
 async def long_polling():
     """Start long polling to receive updates from Telegram."""
