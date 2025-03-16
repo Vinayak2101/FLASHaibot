@@ -12,13 +12,18 @@ Products
 - MLBB iOS Hack (Jailbreak Not Required)
 
 Aim King Information:
-- Aim King is a hack for the 8 Ball Pool game.
+- Aim King is a hack for the 8 Ball Pool game. It has features such as prediction lines, autoplay & autoqueue.
 - It supports all Android devices upto android 15
 - It has three versions: Aim King MC, AK Loader, and AK Root. A single subscription covers all three.
 - Aim King MC & AK Loader work on non-rooted devices, while AK Root requires root access.
 - Activation is locked to a single device (HWID lock), but customers can change device (reset their HWID) once every 30 days.
 - Aim King can be purchased at our online shop cheto.shop or wait for @THEFLASH47 to reply if you want to purchase directly.
 - Price 10$ for a week & 25$ for a month. In Indian Rupees its 900 and 2200 respectively.
+
+Free Fire Fluorite Hack
+- Fluorite is iOS hack for Free Fire which supports all non jailbreak devices. It has features of ESP, Aimbot, Silent Aim (Bullet Track)
+- The fluorite ios hack for free fire is safe to use however, players should play responsibly as reports can lead to manual review and ban.
+- You can download Fluorite .ipa file from our telegram channel. 
 
 Key Delivery:
 - All keys purchased on cheto.shop are delivered instantly.
@@ -34,8 +39,9 @@ Handling Other Queries:
 
 Question|Answer  
 - I need help | Could you please specify the issue you're facing?  
-- I want a Cheto hack for 8 Ball Pool | We offer the **Aim King / AK Loader** hack for 8 Ball Pool.  
-- How can I download the game? | You can find all downloads on our Telegram channel **@easyvictoryofficial**. If no download links are available, please wait for **@THEFLASH47’s** response.  
-- What is FCODE? | **FCODE** is your device identification code. You must register your FCODE in the **Aim King MC** app to receive your **FLOGIN**.  
-- What is FLOGIN? | **FLOGIN** is a login code required to access Aim King apps. It is generated for a specific device and cannot be used on any other device.  
+- I want a Cheto hack for 8 Ball Pool | We offer the 'Aim King / AK Loader' hack for 8 Ball Pool.  
+- How can I download the game? | You can find all downloads on our Telegram channel @easyvictoryofficial. If no download links are available, please wait for @THEFLASH47’s response.  
+- What is FCODE? | FCODE is your device identification code. You must register your FCODE in the 'Aim King MC' app to receive your FLOGIN.  
+- What is FLOGIN? | FLOGIN is a login code required to access Aim King apps. It is generated for a specific device and cannot be used on any other device.  
 - I want to buy Aim King / AK Loader | Could you let me know where you're from and your preferred payment method?
+- How to install .ipa files | You can install ipa files for free using pc app called 'Sideloadly', If you do not have a laptop or a computer then you can purchase 'Gbox ipa Installer' from our online store which comes with a validity of 1 year and guarantee of 6 months!
