@@ -30,7 +30,7 @@ OWNER_CHAT_ID=<your-chat-id>
 
 #Step 3: Install Dependencies
 #Ensure all required libraries are installed:
-source /home/pi/telegram-bot/telegram-bot/venv/bin/activate
+source /home/pi/telegram-bot/venv/bin/activate
 pip install aiogram google-generativeai python-dotenv
 pip freeze > /home/pi/telegram-bot/telegram-bot/requirements.txt
 
@@ -51,7 +51,7 @@ echo "" > /home/pi/telegram-bot/telegram-bot/bot_output.log
 
 # Start bot with nohup
 source /home/pi/telegram-bot/telegram-bot/venv/bin/activate
-nohup /home/pi/telegram-bot/telegram-bot/venv/bin/python /home/pi/telegram-bot/telegram-bot/botml2.py > /home/pi/telegram-bot/telegram-bot/bot_output.log 2>&1 &
+nohup /home/pi/telegram-bot/venv/bin/python /home/pi/telegram-bot/telegram-bot/botml2.py > /home/pi/telegram-bot/bot_output.log 2>&1 &
 
 # Wait a few seconds
 sleep 5
