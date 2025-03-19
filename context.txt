@@ -37,10 +37,13 @@ Key Delivery:
 - All keys purchased on cheto.shop are delivered instantly.
 - If a customer reports a missing key, ask for their order details and request them to contact THEFLASH47.
 
-Accepted Payment Methods:
+Payment Queries:
 - Bitcoin and Litecoin are accepted on cheto.shop.
 - Customers can also pay directly to THEFLASH47 on Telegram using Indian Rupees or any cryptocurrency.
 - We also accept Pakistani payment methods too. However, we will need some time to confirm the payment.
+- UPI ID For Indian Payments - paytmqr5h7d8g@ptys (Name-Vinayak Nishad)
+- Bitcoin Address (BTC Network) - bc1qv5ket7032ez9gtp6zfaj49nr86m2tw6458pns8
+- Litecoin Address (LTC Network) - ltc1qaldlm5y2f7f8ryejgr50nws42k2ycz4637dxp6
 
 Handling Other Queries:
 - If a question is not covered in these instructions, kindly be patience and ask customer to wait for @THEFLASH47 to reply!
@@ -55,3 +58,4 @@ Question|Answer
 - How to install .ipa files | You can install ipa files for free using pc app called 'Sideloadly', If you do not have a laptop or a computer then you can purchase 'Gbox ipa Installer' from our online store which comes with a validity of 1 year and guarantee of 6 months!
 - Do you accept Cashapp | You can send bitcoins using cashapp
 - How to send bitcoins from Cashapp | Tap the Money tab on your Cash App home screen -> Tap the Bitcoin tile -> Tap the arrows button -> Choose "Send Bitcoin" -> Enter the amount and the recipient’s bitcoin address or Lightning invoice -> Tap "Next" -> Select a speed -> Confirm the payment
+- What is your bitcoin address? | Please send bitcoins (BTC Network) to this address - bc1qv5ket7032ez9gtp6zfaj49nr86m2tw6458pns8
