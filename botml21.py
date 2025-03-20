@@ -57,7 +57,11 @@ def init_db():
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS processed_updates (
         update_id INTEGER PRIMARY KEY
-    )''')  # New table to track processed updates
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_timestamps (
+        chat_id TEXT PRIMARY KEY,
+        last_message_time REAL NOT NULL
+    )''')
     conn.commit()
     conn.close()
 
@@ -93,18 +97,38 @@ def mark_update_processed(update_id):
     conn.commit()
     conn.close()
 
+def get_last_message_time(chat_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT last_message_time FROM chat_timestamps WHERE chat_id = ?", (chat_id,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else 0
+
+def update_last_message_time(chat_id, timestamp):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO chat_timestamps (chat_id, last_message_time) VALUES (?, ?)",
+              (chat_id, timestamp))
+    conn.commit()
+    conn.close()
+
 # Track blocked chats
 BLOCKED_CHATS = set()
 
 # Delay before sending replies (in seconds)
 REPLY_DELAY = 2
+MIN_MESSAGE_INTERVAL = 10  # Minimum time between messages to the same chat
+BATCH_WAIT_TIME = 30  # Wait time (seconds) to collect messages in a batch, editable
 
 # Batch message queue with limit
 message_queue = []
 MAX_QUEUE_SIZE = 10  # Prevent queue from growing too large
 
+# Batch processing storage
+message_batches = {}  # {chat_id: {"messages": [], "start_time": float, "task": asyncio.Task}}
+
 async def notify_owner(message: str):
-    """Notify the owner of errors or manual intervention needs."""
     await send_message(OWNER_CHAT_ID, message)
 
 def generate_response_with_retry(prompt: str, max_retries: int = 3):
@@ -119,9 +143,16 @@ def generate_response_with_retry(prompt: str, max_retries: int = 3):
             raise e
 
 async def send_message(chat_id: str, text: str, business_connection_id: str = None):
-    """Queue a message for sending with limits."""
+    """Queue a message for sending with rate limiting."""
     if chat_id in BLOCKED_CHATS:
         logger.warning(f"Skipping message to blocked chat {chat_id}")
+        return None
+
+    current_time = time.time()
+    last_message_time = get_last_message_time(chat_id)
+
+    if current_time - last_message_time < MIN_MESSAGE_INTERVAL:
+        logger.debug(f"Skipping message to {chat_id} - too soon (last sent: {last_message_time}, now: {current_time})")
         return None
 
     if len(message_queue) >= MAX_QUEUE_SIZE:
@@ -133,17 +164,17 @@ async def send_message(chat_id: str, text: str, business_connection_id: str = No
         payload["business_connection_id"] = business_connection_id
     message_queue.append(payload)
     logger.debug(f"Queued message for chat {chat_id}: {text}")
-    return str(time.time())
+    return str(current_time)
 
 async def flush_message_queue():
-    """Send queued messages with deduplication."""
+    """Send queued messages with deduplication and timestamp updates."""
     global message_queue
     if not message_queue:
         return
 
     logger.debug(f"Flushing {len(message_queue)} messages from queue")
-    sent_messages = set()  # Track sent message content to avoid duplicates
-    for msg in message_queue[:]:  # Copy to allow modification
+    sent_messages = set()
+    for msg in message_queue[:]:
         msg_key = f"{msg['chat_id']}:{msg['text']}"
         if msg_key in sent_messages:
             logger.debug(f"Skipping duplicate message for chat {msg['chat_id']}: {msg['text']}")
@@ -155,7 +186,8 @@ async def flush_message_queue():
             response.raise_for_status()
             logger.info(f"Sent message to chat {msg['chat_id']}: {msg['text']}")
             sent_messages.add(msg_key)
-            message_queue.remove(msg)  # Remove only after successful send
+            update_last_message_time(msg['chat_id'], time.time())
+            message_queue.remove(msg)
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 400:
                 logger.error(f"Failed to send message to chat {msg['chat_id']}: {str(e)}")
@@ -164,7 +196,7 @@ async def flush_message_queue():
             else:
                 logger.error(f"Failed to send message to chat {msg['chat_id']}: {str(e)}")
                 await notify_owner(f"Failed to send message to chat {msg['chat_id']}: {str(e)}")
-            message_queue.remove(msg)  # Remove on failure to avoid retries
+            message_queue.remove(msg)
         except Exception as e:
             logger.error(f"Failed to send message to chat {msg['chat_id']}: {str(e)}")
             await notify_owner(f"Failed to send message to chat {msg['chat_id']}: {str(e)}")
@@ -183,6 +215,33 @@ async def send_chat_action(chat_id: str, action: str, business_connection_id: st
         logger.info(f"Sent chat action {action} to chat {chat_id}")
     except Exception as e:
         logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)}")
+
+async def process_batch(chat_id: str, business_connection_id: str = None):
+    """Process a batch of messages for a chat and send a single response."""
+    batch = message_batches.pop(chat_id, None)
+    if not batch or not batch["messages"]:
+        return
+
+    messages = batch["messages"]
+    logger.debug(f"Processing batch for chat {chat_id} with {len(messages)} messages")
+
+    # Save messages to DB and prepare prompt
+    for msg in messages:
+        save_message_to_db(chat_id, "user", msg)
+    
+    history = load_chat_history(chat_id)
+    history_text = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history])
+    batch_text = "\n".join([f"User message {i+1}: {msg}" for i, msg in enumerate(messages)])
+    prompt = f"{CONTEXT}\n{LEARNED_CONTEXT}\n\nChat History:\n{history_text}\n\nUser messages in this batch:\n{batch_text}"
+
+    try:
+        response = generate_response_with_retry(prompt)
+        await send_message(chat_id, response, business_connection_id)
+        save_message_to_db(chat_id, "bot", response)
+    except Exception as e:
+        logger.error(f"Error processing batch for chat {chat_id}: {str(e)}")
+        await notify_owner(f"Error processing batch for chat {chat_id}: {str(e)}")
+        await send_message(chat_id, "Oops, something went wrong! Please wait for THEFLASH47 to assist you.", business_connection_id)
 
 async def handle_business_message(update: dict):
     business_message = update.get("business_message", {})
@@ -207,21 +266,21 @@ async def handle_business_message(update: dict):
         await send_message(chat_id, "Sorry, I can only process text messages. Please wait for THEFLASH47 to assist you.", business_connection_id)
         return
 
-    save_message_to_db(chat_id, "user", user_message)
-    await send_chat_action(chat_id, "typing", business_connection_id)
-
-    history = load_chat_history(chat_id)
-    history_text = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history])
-    prompt = f"{CONTEXT}\n{LEARNED_CONTEXT}\n\nChat History:\n{history_text}\n\nUser question: {user_message}"
-
-    try:
-        response = generate_response_with_retry(prompt)
-        await send_message(chat_id, response, business_connection_id)
-        save_message_to_db(chat_id, "bot", response)
-    except Exception as e:
-        logger.error(f"Error handling business message from chat {chat_id}: {str(e)}")
-        await notify_owner(f"Error handling business message from chat {chat_id}: {str(e)}")
-        await send_message(chat_id, "Oops, something went wrong! Please wait for THEFLASH47 to assist you.", business_connection_id)
+    # Batch message handling
+    current_time = time.time()
+    if chat_id not in message_batches:
+        await send_chat_action(chat_id, "typing", business_connection_id)
+        message_batches[chat_id] = {
+            "messages": [user_message],
+            "start_time": current_time,
+            "task": asyncio.create_task(asyncio.sleep(BATCH_WAIT_TIME, result=chat_id))
+        }
+        message_batches[chat_id]["task"].add_done_callback(
+            lambda task: asyncio.create_task(process_batch(task.result(), business_connection_id))
+        )
+    else:
+        message_batches[chat_id]["messages"].append(user_message)
+        logger.debug(f"Added message to batch for chat {chat_id}, total: {len(message_batches[chat_id]['messages'])}")
 
 async def handle_direct_message(update: dict):
     message = update.get("message", {})
@@ -258,21 +317,21 @@ async def handle_direct_message(update: dict):
         await send_message(chat_id, "Sorry, I can only process text messages. Please wait for THEFLASH47 to assist you.")
         return
 
-    save_message_to_db(chat_id, "user", user_message)
-    await send_chat_action(chat_id, "typing")
-
-    history = load_chat_history(chat_id)
-    history_text = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history])
-    prompt = f"{CONTEXT}\n{LEARNED_CONTEXT}\n\nChat History:\n{history_text}\n\nUser question: {user_message}"
-
-    try:
-        response = generate_response_with_retry(prompt)
-        await send_message(chat_id, response)
-        save_message_to_db(chat_id, "bot", response)
-    except Exception as e:
-        logger.error(f"Error handling direct message from chat {chat_id}: {str(e)}")
-        await notify_owner(f"Error handling direct message from chat {chat_id}: {str(e)}")
-        await send_message(chat_id, "Oops, something went wrong! Please wait for THEFLASH47 to assist you.")
+    # Batch message handling
+    current_time = time.time()
+    if chat_id not in message_batches:
+        await send_chat_action(chat_id, "typing")
+        message_batches[chat_id] = {
+            "messages": [user_message],
+            "start_time": current_time,
+            "task": asyncio.create_task(asyncio.sleep(BATCH_WAIT_TIME, result=chat_id))
+        }
+        message_batches[chat_id]["task"].add_done_callback(
+            lambda task: asyncio.create_task(process_batch(task.result()))
+        )
+    else:
+        message_batches[chat_id]["messages"].append(user_message)
+        logger.debug(f"Added message to batch for chat {chat_id}, total: {len(message_batches[chat_id]['messages'])}")
 
 async def process_update(update: dict):
     """Process incoming updates from Telegram with deduplication."""
@@ -322,9 +381,10 @@ async def start_webhook_server():
     await asyncio.to_thread(server.serve_forever)
 
 async def main():
-    global loop, message_queue
+    global loop, message_queue, message_batches
     loop = asyncio.get_running_loop()
     message_queue = []  # Reset queue on startup
+    message_batches = {}  # Reset batches on startup
     init_db()  # Ensure DB is initialized
     logger.info("Bot is starting...")
     await set_webhook()
