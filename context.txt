@@ -64,6 +64,7 @@ Question|Answer
 - What is FLOGIN? | FLOGIN is a login code required to access Aim King apps. It is generated for a specific device and cannot be used on any other device.  
 - I want to buy Aim King / AK Loader | Could you let me know where you're from and your preferred payment method?
 - How to install .ipa files | You can install ipa files for free using pc app called 'Sideloadly', If you do not have a laptop or a computer then you can purchase 'Gbox ipa Installer' from our online store which comes with a validity of 1 year and guarantee of 6 months!
-- Do you accept Cashapp | You can send bitcoins using cashapp
+- Do you accept Cashapp | You can send bitcoins using cashapp.
+- How to buy using cashapp? | To buy using cashapp, first you have to create order on cheto.shop using bitcoin, then send bitcoins using cashapp to the address on invoice page.
 - How to send bitcoins from Cashapp | Tap the Money tab on your Cash App home screen -> Tap the Bitcoin tile -> Tap the arrows button -> Choose "Send Bitcoin" -> Enter the amount and the recipient’s bitcoin address or Lightning invoice -> Tap "Next" -> Select a speed -> Confirm the payment
 - What is your bitcoin address? | Please send bitcoins (BTC Network) to this address - bc1qv5ket7032ez9gtp6zfaj49nr86m2tw6458pns8
