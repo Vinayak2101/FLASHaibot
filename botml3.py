@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")  # Your chat ID (e.g., 655037157)
+OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g., https://mybot.serveo.net
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+PORT = 8443
 
 logger.debug(f"Loaded OWNER_CHAT_ID: {OWNER_CHAT_ID}")
 logger.debug(f"Loaded WEBHOOK_URL: {WEBHOOK_URL}")
@@ -54,10 +55,15 @@ def init_db():
         content TEXT NOT NULL,
         timestamp REAL NOT NULL
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS processed_updates (
+        update_id INTEGER PRIMARY KEY
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_timestamps (
+        chat_id TEXT PRIMARY KEY,
+        last_message_time REAL NOT NULL
+    )''')
     conn.commit()
     conn.close()
-
-init_db()
 
 def save_message_to_db(chat_id, role, content):
     conn = sqlite3.connect(DB_FILE)
@@ -76,21 +82,53 @@ def load_chat_history(chat_id, limit=5):
     conn.close()
     return [{"role": row[0], "content": row[1]} for row in history[::-1]]
 
+def is_update_processed(update_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT update_id FROM processed_updates WHERE update_id = ?", (update_id,))
+    result = c.fetchone()
+    conn.close()
+    return result is not None
+
+def mark_update_processed(update_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO processed_updates (update_id) VALUES (?)", (update_id,))
+    conn.commit()
+    conn.close()
+
+def get_last_message_time(chat_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT last_message_time FROM chat_timestamps WHERE chat_id = ?", (chat_id,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else 0
+
+def update_last_message_time(chat_id, timestamp):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO chat_timestamps (chat_id, last_message_time) VALUES (?, ?)",
+              (chat_id, timestamp))
+    conn.commit()
+    conn.close()
+
 # Track blocked chats
 BLOCKED_CHATS = set()
 
 # Delay before sending replies (in seconds)
 REPLY_DELAY = 2
+MIN_MESSAGE_INTERVAL = 10  # Minimum time (seconds) between messages to the same chat
 
-# Batch message queue
+# Batch message queue with limit
 message_queue = []
+MAX_QUEUE_SIZE = 10  # Prevent queue from growing too large
 
 async def notify_owner(message: str):
     """Notify the owner of errors or manual intervention needs."""
     await send_message(OWNER_CHAT_ID, message)
 
 def generate_response_with_retry(prompt: str, max_retries: int = 3):
-    """Generate a response with retry logic for API failures."""
     for attempt in range(max_retries):
         try:
             response = model.generate_content(prompt)
@@ -102,50 +140,72 @@ def generate_response_with_retry(prompt: str, max_retries: int = 3):
             raise e
 
 async def send_message(chat_id: str, text: str, business_connection_id: str = None):
-    """Queue a message for batch sending."""
+    """Queue a message for sending with rate limiting."""
     if chat_id in BLOCKED_CHATS:
         logger.warning(f"Skipping message to blocked chat {chat_id}")
+        return None
+
+    current_time = time.time()
+    last_message_time = get_last_message_time(chat_id)
+
+    # Check if enough time has passed since the last message
+    if current_time - last_message_time < MIN_MESSAGE_INTERVAL:
+        logger.debug(f"Rate limit hit for chat {chat_id}: last sent at {last_message_time}, now {current_time}, interval {MIN_MESSAGE_INTERVAL}")
+        return None
+
+    if len(message_queue) >= MAX_QUEUE_SIZE:
+        logger.warning(f"Message queue full ({MAX_QUEUE_SIZE} messages), dropping message for {chat_id}: {text}")
         return None
 
     payload = {"chat_id": chat_id, "text": text}
     if business_connection_id:
         payload["business_connection_id"] = business_connection_id
     message_queue.append(payload)
-    logger.debug(f"Queued message for chat {chat_id}: {text}")
-    return str(time.time())  # Temporary message ID
+    logger.debug(f"Queued message for chat {chat_id}: {text} at {current_time}")
+    return str(current_time)
 
 async def flush_message_queue():
-    """Send all queued messages in a batch."""
+    """Send queued messages with deduplication and timestamp updates."""
     global message_queue
     if not message_queue:
+        logger.debug("Message queue is empty, nothing to flush")
         return
 
     logger.debug(f"Flushing {len(message_queue)} messages from queue")
-    for msg in message_queue:
+    sent_messages = set()  # Track sent message content to avoid duplicates
+    for msg in message_queue[:]:  # Copy to allow modification
+        msg_key = f"{msg['chat_id']}:{msg['text']}"
+        if msg_key in sent_messages:
+            logger.debug(f"Skipping duplicate message for chat {msg['chat_id']}: {msg['text']}")
+            message_queue.remove(msg)
+            continue
         try:
+            logger.debug(f"Preparing to send message to chat {msg['chat_id']}: {msg['text']}")
             await asyncio.sleep(REPLY_DELAY)
             response = requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=msg)
             response.raise_for_status()
-            logger.info(f"Sent message to chat {msg['chat_id']}: {msg['text']}")
+            logger.info(f"Sent message to chat {msg['chat_id']}: {msg['text']} at {time.time()}")
+            sent_messages.add(msg_key)
+            update_last_message_time(msg['chat_id'], time.time())  # Update timestamp after sending
+            message_queue.remove(msg)  # Remove only after successful send
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 400:
                 logger.error(f"Failed to send message to chat {msg['chat_id']}: {str(e)}")
-                BLOCKED_CHATS.add(msg["chat_id"])
+                BLOCKED_CHATS.add(msg['chat_id'])
                 await notify_owner(f"Chat {msg['chat_id']} blocked or restricted: {str(e)}")
             else:
                 logger.error(f"Failed to send message to chat {msg['chat_id']}: {str(e)}")
                 await notify_owner(f"Failed to send message to chat {msg['chat_id']}: {str(e)}")
+            message_queue.remove(msg)  # Remove on failure to avoid retries
         except Exception as e:
             logger.error(f"Failed to send message to chat {msg['chat_id']}: {str(e)}")
             await notify_owner(f"Failed to send message to chat {msg['chat_id']}: {str(e)}")
-    message_queue = []
+            message_queue.remove(msg)
 
 async def send_chat_action(chat_id: str, action: str, business_connection_id: str = None):
-    """Send a chat action (e.g., typing)."""
     if chat_id in BLOCKED_CHATS:
         logger.warning(f"Skipping chat action to blocked chat {chat_id}")
         return
-
     try:
         payload = {"chat_id": chat_id, "action": action}
         if business_connection_id:
@@ -157,7 +217,6 @@ async def send_chat_action(chat_id: str, action: str, business_connection_id: st
         logger.error(f"Failed to send chat action to chat {chat_id}: {str(e)}")
 
 async def handle_business_message(update: dict):
-    """Handle business messages with context-aware responses."""
     business_message = update.get("business_message", {})
     if not business_message or "text" not in business_message:
         logger.debug(f"No valid text in business message update: {json.dumps(update)}")
@@ -165,8 +224,6 @@ async def handle_business_message(update: dict):
 
     sender_id = str(business_message["from"]["id"])
     chat_id = str(business_message["chat"]["id"])
-
-    # Ignore messages sent by the owner
     if sender_id == OWNER_CHAT_ID:
         logger.debug(f"Ignoring business message from owner (sender_id: {sender_id}) in chat {chat_id}")
         save_message_to_db(chat_id, "user", business_message["text"])
@@ -199,7 +256,6 @@ async def handle_business_message(update: dict):
         await send_message(chat_id, "Oops, something went wrong! Please wait for THEFLASH47 to assist you.", business_connection_id)
 
 async def handle_direct_message(update: dict):
-    """Handle direct messages with context-aware responses."""
     message = update.get("message", {})
     if not message or "text" not in message:
         logger.debug(f"No valid text in direct message update: {json.dumps(update)}")
@@ -207,8 +263,6 @@ async def handle_direct_message(update: dict):
 
     sender_id = str(message["from"]["id"])
     chat_id = str(message["chat"]["id"])
-
-    # Ignore messages sent by the owner and store them as context
     if sender_id == OWNER_CHAT_ID:
         logger.debug(f"Ignoring direct message from owner (sender_id: {sender_id}) in chat {chat_id}")
         save_message_to_db(chat_id, "user", message["text"])
@@ -253,13 +307,23 @@ async def handle_direct_message(update: dict):
         await send_message(chat_id, "Oops, something went wrong! Please wait for THEFLASH47 to assist you.")
 
 async def process_update(update: dict):
-    """Process incoming updates from Telegram."""
+    """Process incoming updates from Telegram with deduplication."""
+    update_id = update.get("update_id")
+    if not update_id:
+        logger.debug(f"No update_id in update: {json.dumps(update)}")
+        return
+
+    if is_update_processed(update_id):
+        logger.debug(f"Skipping already processed update_id: {update_id}")
+        return
+
+    mark_update_processed(update_id)
     logger.debug(f"Processing update: {json.dumps(update)}")
     if "business_message" in update:
         await handle_business_message(update)
     elif "message" in update:
         await handle_direct_message(update)
-    await flush_message_queue()  # Flush queue after each update
+    await flush_message_queue()
 
 # Webhook Server
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -272,7 +336,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 async def set_webhook():
-    """Set up the webhook with Telegram."""
     try:
         payload = {
             "url": WEBHOOK_URL,
@@ -286,15 +349,15 @@ async def set_webhook():
         await notify_owner(f"Failed to set webhook: {str(e)}")
 
 async def start_webhook_server():
-    """Start the webhook server."""
-    server = HTTPServer(('0.0.0.0', 8443), WebhookHandler)
-    logger.info("Starting webhook server on port 8443...")
+    server = HTTPServer(('0.0.0.0', PORT), WebhookHandler)
+    logger.info(f"Starting webhook server on port {PORT}...")
     await asyncio.to_thread(server.serve_forever)
 
 async def main():
-    """Start the bot with webhook support."""
-    global loop
+    global loop, message_queue
     loop = asyncio.get_running_loop()
+    message_queue = []  # Reset queue on startup
+    init_db()  # Ensure DB is initialized
     logger.info("Bot is starting...")
     await set_webhook()
     await start_webhook_server()
